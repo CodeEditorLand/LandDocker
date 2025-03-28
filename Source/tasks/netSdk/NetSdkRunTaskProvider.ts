@@ -4,121 +4,88 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as path from "path";
-import {
-	CancellationToken,
-	CustomExecution,
-	Task,
-	TaskDefinition,
-	TaskScope,
-} from "vscode";
-
+import { CancellationToken, CustomExecution, Task, TaskDefinition, TaskScope } from "vscode";
 import { DockerPseudoterminal } from "../DockerPseudoterminal";
 import { DockerRunTask } from "../DockerRunTaskProvider";
-import { DockerTaskProvider } from "../DockerTaskProvider";
-import {
-	NetCoreRunTaskDefinition,
-	NetCoreTaskHelper,
-} from "../netcore/NetCoreTaskHelper";
-import { DockerRunTaskContext } from "../TaskHelper";
-import {
-	getNetSdkBuildCommand,
-	getNetSdkRunCommand,
-	NetSdkRunTaskType,
-} from "./netSdkTaskUtils";
+import { DockerTaskProvider } from '../DockerTaskProvider';
+import { DockerRunTaskContext } from '../TaskHelper';
+import { NetCoreRunTaskDefinition } from "../netcore/NetCoreTaskHelper";
+import { NetSdkRunTaskType, getNetSdkBuildCommand, getNetSdkRunCommand } from './netSdkTaskUtils';
 
-const NetSdkDebugTaskName = "debug";
+const NetSdkDebugTaskName = 'debug';
 
 export type NetSdkRunTaskDefinition = NetCoreRunTaskDefinition;
 
 export class NetSdkRunTaskProvider extends DockerTaskProvider {
-	public constructor() {
-		super(NetSdkRunTaskType, undefined);
-	}
 
-	public provideTasks(token: CancellationToken): Task[] {
-		return []; // this task is not discoverable this way
-	}
+    public constructor() { super(NetSdkRunTaskType, undefined); }
 
-	protected async executeTaskInternal(
-		context: DockerRunTaskContext,
-		task: DockerRunTask,
-	): Promise<void> {
-		const projectPath = task.definition.netCore?.appProject;
+    public provideTasks(token: CancellationToken): Task[] {
+        return []; // this task is not discoverable this way
+    }
 
-		const isProjectWebApp = await NetCoreTaskHelper.isWebApp(projectPath);
+    protected async executeTaskInternal(context: DockerRunTaskContext, task: DockerRunTask): Promise<void> {
+        const projectPath = task.definition.netCore?.appProject;
+        const projectFolderPath = path.dirname(projectPath);
 
-		const projectFolderPath = path.dirname(projectPath);
+        // use dotnet to build the image
+        const buildCommand = await getNetSdkBuildCommand();
+        await context.terminal.execAsyncInTerminal(
+            buildCommand,
+            {
+                folder: context.folder,
+                token: context.cancellationToken,
+                cwd: projectFolderPath,
+            }
+        );
 
-		// use dotnet to build the image
-		const buildCommand = await getNetSdkBuildCommand(
-			isProjectWebApp,
-			task.definition.dockerRun.image,
-		);
+        // use docker run to run the image
+        const runCommand = await getNetSdkRunCommand(task.definition.dockerRun.image);
+        await context.terminal.execAsyncInTerminal(
+            runCommand,
+            {
+                folder: context.folder,
+                token: context.cancellationToken,
+                cwd: projectFolderPath,
+            }
+        );
 
-		await context.terminal.execAsyncInTerminal(buildCommand, {
-			folder: context.folder,
-			token: context.cancellationToken,
-			cwd: projectFolderPath,
-		});
+        return Promise.resolve();
+    }
 
-		// use docker run to run the image
-		const runCommand = await getNetSdkRunCommand(
-			isProjectWebApp,
-			task.definition.dockerRun.image,
-		);
+    public createNetSdkRunTask(options?: Omit<NetSdkRunTaskDefinition, "type">): { task: Task, promise: Promise<number> } {
+        let task: Task;
+        const definition = {
+            ...options,
+            type: NetSdkRunTaskType,
+        };
 
-		await context.terminal.execAsyncInTerminal(runCommand, {
-			folder: context.folder,
-			token: context.cancellationToken,
-			cwd: projectFolderPath,
-		});
+        const promise = new Promise<number>((resolve, reject) => {
+            task = new Task(
+                definition,
+                TaskScope.Workspace,
+                NetSdkDebugTaskName,
+                NetSdkRunTaskType,
+                new CustomExecution(async (resolveDefinition: TaskDefinition) => {
+                    const pseudoTerminal = new DockerPseudoterminal(new NetSdkRunTaskProvider(), task, resolveDefinition);
 
-		return Promise.resolve();
-	}
+                    const closeEventRegistration = pseudoTerminal.onDidClose((exitCode: number) => {
+                        closeEventRegistration.dispose();
 
-	public createNetSdkRunTask(
-		options?: Omit<NetSdkRunTaskDefinition, "type">,
-	): { task: Task; promise: Promise<number> } {
-		let task: Task;
+                        if (exitCode === 0) {
+                            resolve(exitCode);
+                        } else {
+                            reject(exitCode);
+                        }
+                    });
 
-		const definition = {
-			...options,
-			type: NetSdkRunTaskType,
-		};
+                    return pseudoTerminal;
+                }),
+            );
+        });
 
-		const promise = new Promise<number>((resolve, reject) => {
-			task = new Task(
-				definition,
-				TaskScope.Workspace,
-				NetSdkDebugTaskName,
-				NetSdkRunTaskType,
-				new CustomExecution(
-					async (resolveDefinition: TaskDefinition) => {
-						const pseudoTerminal = new DockerPseudoterminal(
-							new NetSdkRunTaskProvider(),
-							task,
-							resolveDefinition,
-						);
-
-						const closeEventRegistration =
-							pseudoTerminal.onDidClose((exitCode: number) => {
-								closeEventRegistration.dispose();
-
-								if (exitCode === 0) {
-									resolve(exitCode);
-								} else {
-									reject(exitCode);
-								}
-							});
-
-						return pseudoTerminal;
-					},
-				),
-			);
-		});
-
-		return { task, promise };
-	}
+        return { task, promise };
+    }
 }
 
 export const netSdkRunTaskProvider = new NetSdkRunTaskProvider();
